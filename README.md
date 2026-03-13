@@ -1,5 +1,9 @@
 # kcomm
 
+[![CI](https://github.com/lamwl/kcomm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lamwl/kcomm/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
+
 在终端里用交互式选择 kubeconfig、集群环境（context）和 Pod，快速进入 Kubernetes 容器 bash。
 
 - 启动时从已保存的 kube 配置中选择（↑/↓ 选择，回车确定）
@@ -235,3 +239,26 @@ POD_PHASE=Pending python3 ./kcomm.py
 - Python 3 主版对应文档中的“阶段二增强版”，保持相同的选择顺序与 `kubectl` 行为，但交互界面由 `InquirerPy` 提供，不再依赖 `fzf`
 
 详见 [docs/DEV_PLAN.md](docs/DEV_PLAN.md)。
+
+## 开发 / 测试
+
+开发时建议在仓库根目录使用可编辑安装：
+
+```bash
+python3 -m pip install -e .
+```
+
+运行测试请显式使用 `discover` 指向 `tests/` 目录：
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+说明：
+
+- 直接执行 `python3 -m unittest` 可能无法自动发现当前项目测试
+- 当前测试覆盖核心解析逻辑、包装入口和基于 mock kubectl 的集成流程
+
+## License
+
+本项目基于 [MIT License](LICENSE) 开源。

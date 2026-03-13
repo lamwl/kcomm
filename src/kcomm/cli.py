@@ -26,13 +26,15 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from . import __version__
+
 
 DEFAULT_CONFIGS_DIR = ".kube/configs"
 DEFAULT_CONFIG_LIST = ".kube/config-list"
 DEFAULT_CONFIG = ".kube/config"
 DEFAULT_POD_PHASE = "Running"
 ALL_NAMESPACES_LABEL = "<全部命名空间>"
-CLI_VERSION = "0.2.0"
+CLI_VERSION = __version__
 FILTERED_KUBECTL_STDERR_PATTERN = re.compile(
     r"memcache\.go:\d+\].*custom\.metrics\.k8s\.io/v1beta1"
 )
@@ -99,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {CLI_VERSION}",
+        version=f"%(prog)s {__version__}",
     )
     return parser
 

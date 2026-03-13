@@ -1,5 +1,12 @@
 """kcomm package."""
 
-from .cli import CLI_VERSION, main
+__version__ = "0.2.0"
 
-__all__ = ["CLI_VERSION", "main"]
+
+def main() -> int:
+    from .cli import main as cli_main
+
+    return cli_main()
+
+
+__all__ = ["__version__", "main"]

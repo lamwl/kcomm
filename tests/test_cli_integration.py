@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import kcomm.cli as cli
+from kcomm import __version__
 from kcomm.cli import ContextInfo, PodInfo
 
 
@@ -144,7 +145,7 @@ class CliWrapperTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertIn("kcomm 0.2.0", result.stdout)
+        self.assertIn(f"kcomm {__version__}", result.stdout)
 
 
 class MockKubectlIntegrationTest(unittest.TestCase):
