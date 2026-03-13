@@ -10,6 +10,28 @@ $script:KubeConfigsDir = if ($env:KUBE_CONFIGS_DIR) { $env:KUBE_CONFIGS_DIR } el
 $script:KubeConfigList = if ($env:KUBE_CONFIG_LIST) { $env:KUBE_CONFIG_LIST } else { Join-Path $HOME '.kube' 'config-list' }
 $script:FzfOpts = if ($env:FZF_OPTS) { @($env:FZF_OPTS -split '\s+') } else { @('--height=15', '--layout=reverse') }
 $script:PodPhase = if ($env:POD_PHASE) { $env:POD_PHASE } else { 'Running' }
+# Windows 下 fzf preview 由 cmd 执行，需用 helper 接收 {q} 参数避免命令注入
+$script:PreviewHelper = $null
+
+function Initialize-PreviewHelper {
+    if (-not $IsWindows -or $script:PreviewHelper) { return }
+    $script:PreviewHelper = [System.IO.Path]::GetTempFileName() + '.ps1'
+    @'
+param($Mode, $Line)
+if ($Mode -eq 'kubeconfig') {
+    $env:KUBECONFIG = $Line
+    & kubectl config current-context 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host '无效或无法读取' }
+} elseif ($Mode -eq 'context') {
+    & kubectl config view --minify --context $Line -o yaml 2>$null | Select-Object -First 50
+} elseif ($Mode -eq 'pod') {
+    $parts = $Line.Trim() -split '\s+', 2
+    if ($parts.Count -ge 2) {
+        & kubectl --context $env:KCOMM_CTX get pod -n $parts[0] $parts[1] -o wide 2>$null
+    }
+}
+'@ | Set-Content -LiteralPath $script:PreviewHelper -Encoding UTF8
+}
 
 function Exit-WithError([string]$Message) {
     [Console]::Error.WriteLine("kcomm: $Message")
@@ -65,10 +87,11 @@ function Select-Kubeconfig {
     }
 
     if ($IsWindows) {
-        $preview = 'cmd /c "set KUBECONFIG={} && kubectl config current-context || echo 无效或无法读取"'
+        Initialize-PreviewHelper
+        $preview = "pwsh -NoProfile -File `"$script:PreviewHelper`" -Mode kubeconfig -Line {q}"
     }
     else {
-        $preview = 'KUBECONFIG={} kubectl config current-context 2>/dev/null || echo "无效或无法读取"'
+        $preview = 'KUBECONFIG={q} kubectl config current-context 2>/dev/null || echo "无效或无法读取"'
     }
 
     $chosen = $list | fzf @script:FzfOpts --prompt='Kubeconfig> ' --preview $preview --preview-window='right:40%'
@@ -95,10 +118,11 @@ function Select-Context([string]$Kubeconfig) {
     }
 
     if ($IsWindows) {
-        $preview = 'cmd /c "kubectl config view --minify --context={} -o yaml"'
+        Initialize-PreviewHelper
+        $preview = "pwsh -NoProfile -File `"$script:PreviewHelper`" -Mode context -Line {q}"
     }
     else {
-        $preview = 'kubectl config view --minify --context={} -o yaml 2>/dev/null | head -50'
+        $preview = 'kubectl config view --minify --context={q} -o yaml 2>/dev/null | head -50'
     }
 
     $chosen = $list | fzf @script:FzfOpts --prompt='Context (集群环境)> ' --preview $preview --preview-window='right:55%'
@@ -134,10 +158,12 @@ function Select-Pod([string]$Kubeconfig, [string]$Context) {
 
     $env:KCOMM_CTX = $Context
     if ($IsWindows) {
-        $preview = 'cmd /c "kubectl --context=%KCOMM_CTX% get pod -n {1} {2} -o wide"'
+        Initialize-PreviewHelper
+        $preview = "pwsh -NoProfile -File `"$script:PreviewHelper`" -Mode pod -Line {q}"
     }
     else {
-        $preview = 'kubectl --context="$KCOMM_CTX" get pod -n {1} {2} -o wide 2>/dev/null'
+        # 使用 {q} 将当前行以 shell 转义形式传入，在 preview 内解析为 ns/pod 再调用 kubectl，避免命令注入
+        $preview = 'set -- {q}; ns="${1%% *}"; pod="${1#* }"; pod="${pod# }"; kubectl --context="$KCOMM_CTX" get pod -n "$ns" "$pod" -o wide 2>/dev/null || true'
     }
 
     $chosen = $formatted | fzf @script:FzfOpts --prompt='Pod (输入关键字模糊匹配)> ' --preview $preview --preview-window='right:60%'

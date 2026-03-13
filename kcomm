@@ -63,7 +63,7 @@ select_kubeconfig() {
   local chosen
   chosen=$(echo "$list" | fzf $FZF_OPTS \
     --prompt="Kubeconfig> " \
-    --preview='KUBECONFIG={} kubectl config current-context 2>/dev/null || echo "无效或无法读取"' \
+    --preview='KUBECONFIG={q} kubectl config current-context 2>/dev/null || echo "无效或无法读取"' \
     --preview-window=right:40% \
     || true)
   if [[ -z "$chosen" ]]; then
@@ -98,7 +98,7 @@ select_context() {
   local chosen
   chosen=$(echo "$list" | fzf $FZF_OPTS \
     --prompt="Context (集群环境)> " \
-    --preview='kubectl config view --minify --context={} -o yaml 2>/dev/null | head -50' \
+    --preview='kubectl config view --minify --context={q} -o yaml 2>/dev/null | head -50' \
     --preview-window=right:55% \
     || true)
   if [[ -z "$chosen" ]]; then
@@ -127,9 +127,10 @@ select_pod() {
 
   local chosen
   export KCOMM_CTX="$ctx"
+  # 使用 {q} 将当前行以 shell 转义形式传入，在 preview 内解析为 ns/pod 再调用 kubectl，避免命令注入
   chosen=$(echo "$list" | awk -F'\t' '{printf "%-32s %s\n", $1, $2}' | fzf $FZF_OPTS \
     --prompt="Pod (输入关键字模糊匹配)> " \
-    --preview='kubectl --context="$KCOMM_CTX" get pod -n {1} {2} -o wide 2>/dev/null || true' \
+    --preview='set -- {q}; ns="${1%% *}"; pod="${1#* }"; pod="${pod# }"; kubectl --context="$KCOMM_CTX" get pod -n "$ns" "$pod" -o wide 2>/dev/null || true' \
     --preview-window=right:60% \
     || true)
   if [[ -z "$chosen" ]]; then
