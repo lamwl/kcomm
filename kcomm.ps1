@@ -148,7 +148,19 @@ function Get-PodList([string]$Kubeconfig, [string]$Context) {
 function Select-Pod([string]$Kubeconfig, [string]$Context) {
     $list = @(Get-PodList $Kubeconfig $Context)
     if ($list.Count -eq 0) {
-        Exit-WithError '当前集群没有 Running 状态的 Pod，或无法访问集群（请检查 KUBECONFIG、context 与网络）。'
+        # 区分「无 Pod」与「集群不可达/无权限」：重新执行并捕获 stderr 与退出码
+        $env:KUBECONFIG = $Kubeconfig
+        $err = kubectl --context=$Context get pods -A `
+            --field-selector="status.phase=$script:PodPhase" `
+            --request-timeout=10s `
+            -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name' `
+            --no-headers 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            $errTrim = if ($err.Length -gt 450) { $err.Substring(0, 450) + '...' } else { $err }
+            Exit-WithError "无法访问集群或没有权限（kubectl 退出码 $exitCode）。请检查 KUBECONFIG、context、网络与 RBAC。kubectl 输出: $errTrim"
+        }
+        Exit-WithError "当前集群没有 $script:PodPhase 状态的 Pod。"
     }
 
     $formatted = $list | ForEach-Object {

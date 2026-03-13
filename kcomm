@@ -122,7 +122,20 @@ select_pod() {
   local list
   list=$(get_pod_list "$kconfig" "$ctx")
   if [[ -z "$list" ]]; then
-    die "当前集群没有 Running 状态的 Pod，或无法访问集群（请检查 KUBECONFIG、context 与网络）。"
+    # 区分「无 Pod」与「集群不可达/无权限」：重新执行并捕获 stderr 与退出码
+    local err exitcode
+    set +e
+    err=$(KUBECONFIG="$kconfig" kubectl --context="$ctx" get pods -A \
+      --field-selector=status.phase="$POD_PHASE" \
+      --request-timeout=10s \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>&1)
+    exitcode=$?
+    set -e
+    if [[ $exitcode -ne 0 ]]; then
+      err="${err:0:450}"
+      die "无法访问集群或没有权限（kubectl 退出码 $exitcode）。请检查 KUBECONFIG、context、网络与 RBAC。kubectl 输出: ${err}"
+    fi
+    die "当前集群没有 $POD_PHASE 状态的 Pod。"
   fi
 
   local chosen
