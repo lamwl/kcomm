@@ -96,9 +96,10 @@ Set-Alias kcomm 'C:\path\to\kcomm.ps1'
 1. 运行 `kcomm`
 2. 若有多个 kubeconfig，在第一个 fzf 中选择一个 **kubeconfig**（否则自动使用唯一配置）
 3. 在 **Context（集群环境）** fzf 中从该 config 解析出的所有 context 里选一个（列：NAME / CLUSTER / USER / NAMESPACE，右侧可预览该 context 的 yaml）
-4. 在 **Pod** fzf 中**输入关键字**模糊匹配该集群下的 Pod，选中后回车（右侧预览为 `kubectl get pod -o wide`）
-5. 若该 Pod 有多个容器，再在 fzf 中选择 **容器**
-6. 脚本执行 `kubectl exec -it ... -- /bin/bash`（失败则尝试 `/bin/sh`），进入容器 shell
+4. 在 **Namespace（命名空间）** fzf 中选择一个命名空间（首项为「全部命名空间」，选则后续列出全集群 Pod；选具体 ns 则只拉该 ns 的 Pod，大集群下更快）
+5. 在 **Pod** fzf 中**输入关键字**模糊匹配 Pod，选中后回车（右侧预览为 `kubectl get pod -o wide`）
+6. 若该 Pod 有多个容器，再在 fzf 中选择 **容器**
+7. 脚本执行 `kubectl exec -it ... -- /bin/bash`（失败则尝试 `/bin/sh`），进入容器 shell
 
 所有 kubectl 操作均使用所选 context，**不会修改** kubeconfig 文件中的 current-context。
 

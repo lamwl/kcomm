@@ -17,6 +17,10 @@ die() {
   exit 1
 }
 
+filter_kubectl_stderr() {
+  awk '!/memcache\.go:[0-9]+\].*custom\.metrics\.k8s\.io\/v1beta1/'
+}
+
 # 检查依赖
 check_deps() {
   command -v kubectl &>/dev/null || die "未找到 kubectl，请先安装（例如: sudo snap install kubectl --classic）"
@@ -107,53 +111,114 @@ select_context() {
   echo "$chosen"
 }
 
-# 获取 Pod 列表：仅 Running，输出格式  namespace<TAB>podname（使用指定 context）
-get_pod_list() {
+# 获取命名空间列表（使用指定 context）
+get_namespace_list() {
   local kconfig="$1" ctx="$2"
   export KUBECONFIG="$kconfig"
-  kubectl --context="$ctx" get pods -A \
-    --field-selector=status.phase="$POD_PHASE" \
-    -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true
+  kubectl --context="$ctx" get namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v '^$' || true
 }
 
-# 选择 Pod：fzf 模糊，输出选中的 namespace<TAB>podname
-select_pod() {
+# 选择命名空间：此阶段仅选择 namespace，不查询 Pod；确定后再拉取 Pod 列表
+select_namespace() {
   local kconfig="$1" ctx="$2"
+  export KUBECONFIG="$kconfig"
   local list
-  list=$(get_pod_list "$kconfig" "$ctx")
+  list=$(get_namespace_list "$kconfig" "$ctx")
+  if [[ -z "$list" ]]; then
+    set +e
+    local err exitcode
+    err=$(KUBECONFIG="$kconfig" kubectl --context="$ctx" get namespaces --request-timeout=10s 2>&1)
+    exitcode=$?
+    set -e
+    if [[ $exitcode -ne 0 ]]; then
+      die "无法获取命名空间列表（权限或网络）。kubectl 输出: ${err:0:350}"
+    fi
+    die "未找到任何命名空间。"
+  fi
+  # 首行增加「全部命名空间」选项，选中时后续按 -A 拉取（适合小集群或需跨 ns 时）
+  list="<全部命名空间>${list:+$'\n'$list}"
+  local chosen
+  chosen=$(echo "$list" | fzf $FZF_OPTS --prompt="Namespace (命名空间)> " \
+    --preview='echo "选择命名空间，确认后再查询 Pod 列表"' \
+    --preview-window=right:50% || true)
+  [[ -z "$chosen" ]] && die "未选择命名空间，已退出"
+  if [[ "$chosen" = "<全部命名空间>" ]]; then
+    echo ""
+    return
+  fi
+  echo "$chosen"
+}
+
+
+# 获取 Pod 列表：仅 Running；返回 namespace、pod、status、startTime、podIP
+get_pod_list() {
+  local kconfig="$1" ctx="$2" ns="$3"
+  export KUBECONFIG="$kconfig"
+  if [[ -n "$ns" ]]; then
+    kubectl --context="$ctx" get pods -n "$ns" \
+      --field-selector=status.phase="$POD_PHASE" \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.status.startTime}{"\t"}{.status.podIP}{"\n"}{end}' 2>/dev/null || true
+  else
+    kubectl --context="$ctx" get pods -A \
+      --field-selector=status.phase="$POD_PHASE" \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.status.startTime}{"\t"}{.status.podIP}{"\n"}{end}' 2>/dev/null || true
+  fi
+}
+
+# 选择 Pod：全部命名空间时 preview 展示 namespace；指定命名空间时不展示
+select_pod() {
+  local kconfig="$1" ctx="$2" ns="$3"
+  local list
+  list=$(get_pod_list "$kconfig" "$ctx" "$ns")
   if [[ -z "$list" ]]; then
     # 区分「无 Pod」与「集群不可达/无权限」：重新执行并捕获 stderr 与退出码
     local err exitcode
     set +e
-    err=$(KUBECONFIG="$kconfig" kubectl --context="$ctx" get pods -A \
-      --field-selector=status.phase="$POD_PHASE" \
-      --request-timeout=10s \
-      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>&1)
+    if [[ -n "$ns" ]]; then
+      err=$(KUBECONFIG="$kconfig" kubectl --context="$ctx" get pods -n "$ns" \
+        --field-selector=status.phase="$POD_PHASE" --request-timeout=10s \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>&1)
+    else
+      err=$(KUBECONFIG="$kconfig" kubectl --context="$ctx" get pods -A \
+        --field-selector=status.phase="$POD_PHASE" --request-timeout=10s \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>&1)
+    fi
     exitcode=$?
     set -e
     if [[ $exitcode -ne 0 ]]; then
       err="${err:0:450}"
       die "无法访问集群或没有权限（kubectl 退出码 $exitcode）。请检查 KUBECONFIG、context、网络与 RBAC。kubectl 输出: ${err}"
     fi
-    die "当前集群没有 $POD_PHASE 状态的 Pod。"
+    if [[ -n "$ns" ]]; then
+      die "命名空间 \"$ns\" 下没有 $POD_PHASE 状态的 Pod。"
+    else
+      die "当前集群没有 $POD_PHASE 状态的 Pod。"
+    fi
   fi
 
-  local chosen
-  export KCOMM_CTX="$ctx"
-  # 使用 {q} 将当前行以 shell 转义形式传入，在 preview 内解析为 ns/pod 再调用 kubectl，避免命令注入
-  chosen=$(echo "$list" | awk -F'\t' '{printf "%-32s %s\n", $1, $2}' | fzf $FZF_OPTS \
+  local chosen preview_command
+  # 预览仅展示列表中已获取的本地字段，避免选择时再次请求集群
+  if [[ -n "$ns" ]]; then
+    preview_command='printf "%s\n" {} | awk -F "\t" "{printf \"Pod: %s\n状态: %s\n启动时间: %s\nPod IP: %s\n\", \$2, (\$3 != \"\" ? \$3 : \"-\"), (\$4 != \"\" ? \$4 : \"-\"), (\$5 != \"\" ? \$5 : \"-\")}"'
+  else
+    preview_command='printf "%s\n" {} | awk -F "\t" "{printf \"命名空间: %s\nPod: %s\n状态: %s\n启动时间: %s\nPod IP: %s\n\", \$1, \$2, (\$3 != \"\" ? \$3 : \"-\"), (\$4 != \"\" ? \$4 : \"-\"), (\$5 != \"\" ? \$5 : \"-\")}"'
+  fi
+
+  chosen=$(printf '%s\n' "$list" | fzf $FZF_OPTS \
     --prompt="Pod (输入关键字模糊匹配)> " \
-    --preview='set -- {q}; ns="${1%% *}"; pod="${1#* }"; pod="${pod# }"; kubectl --context="$KCOMM_CTX" get pod -n "$ns" "$pod" -o wide 2>/dev/null || true' \
+    --delimiter=$'\t' \
+    --with-nth=2,3,4,5 \
+    --preview="$preview_command" \
     --preview-window=right:60% \
     || true)
   if [[ -z "$chosen" ]]; then
     die "未选择 Pod，已退出"
   fi
 
-  local ns pod
-  ns=$(echo "$chosen" | awk '{print $1}')
-  pod=$(echo "$chosen" | awk '{print $2}')
-  echo "${ns}	${pod}"
+  local selected_ns pod
+  selected_ns=$(echo "$chosen" | awk -F'\t' '{print $1}')
+  pod=$(echo "$chosen" | awk -F'\t' '{print $2}')
+  echo "${selected_ns}	${pod}"
 }
 
 # 若 Pod 多容器，用 fzf 选一个，否则返回第一个容器名
@@ -171,16 +236,20 @@ select_container() {
   echo "$containers" | fzf $FZF_OPTS --prompt="容器> " || echo "$(echo "$containers" | head -1)"
 }
 
-# 进入容器：优先 bash，失败则 sh（使用指定 context）
+# 进入容器：仅在确认没有 /bin/bash 时才回退到 sh
 exec_into_pod() {
   local kconfig="$1" ctx="$2" ns="$3" pod="$4" container="$5"
   export KUBECONFIG="$kconfig"
   local cmd_extra=()
   [[ -n "$container" ]] && cmd_extra=(-c "$container")
-  if kubectl --context="$ctx" exec -it -n "$ns" "$pod" "${cmd_extra[@]}" -- /bin/bash 2>/dev/null; then
-    return
+
+  if kubectl --context="$ctx" exec -n "$ns" "$pod" "${cmd_extra[@]}" -- test -x /bin/bash >/dev/null 2>&1; then
+    kubectl --context="$ctx" exec -it -n "$ns" "$pod" "${cmd_extra[@]}" -- /bin/bash \
+      2> >(filter_kubectl_stderr >&2)
+  else
+    kubectl --context="$ctx" exec -it -n "$ns" "$pod" "${cmd_extra[@]}" -- /bin/sh \
+      2> >(filter_kubectl_stderr >&2)
   fi
-  kubectl --context="$ctx" exec -it -n "$ns" "$pod" "${cmd_extra[@]}" -- /bin/sh
 }
 
 main() {
@@ -194,8 +263,12 @@ main() {
   local ctx
   ctx=$(select_context "$kconfig")
 
+  # 先选命名空间，大集群下避免一次性拉全量 Pod
+  local selected_ns
+  selected_ns=$(select_namespace "$kconfig" "$ctx")
+
   local ns_pod
-  ns_pod=$(select_pod "$kconfig" "$ctx")
+  ns_pod=$(select_pod "$kconfig" "$ctx" "$selected_ns")
   [[ -z "$ns_pod" ]] && exit 1
   local ns pod
   ns="${ns_pod%%	*}"

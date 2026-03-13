@@ -10,7 +10,7 @@ $script:KubeConfigsDir = if ($env:KUBE_CONFIGS_DIR) { $env:KUBE_CONFIGS_DIR } el
 $script:KubeConfigList = if ($env:KUBE_CONFIG_LIST) { $env:KUBE_CONFIG_LIST } else { Join-Path $HOME '.kube' 'config-list' }
 $script:FzfOpts = if ($env:FZF_OPTS) { @($env:FZF_OPTS -split '\s+') } else { @('--height=15', '--layout=reverse') }
 $script:PodPhase = if ($env:POD_PHASE) { $env:POD_PHASE } else { 'Running' }
-# Windows 下 fzf preview 由 cmd 执行，需用 helper 接收 {q} 参数避免命令注入
+# Windows 下 fzf preview 由 cmd 执行，需用 helper 接收当前行内容
 $script:PreviewHelper = $null
 
 function Initialize-PreviewHelper {
@@ -24,10 +24,16 @@ if ($Mode -eq 'kubeconfig') {
     if ($LASTEXITCODE -ne 0) { Write-Host '无效或无法读取' }
 } elseif ($Mode -eq 'context') {
     & kubectl config view --minify --context $Line -o yaml 2>$null | Select-Object -First 50
-} elseif ($Mode -eq 'pod') {
-    $parts = $Line.Trim() -split '\s+', 2
-    if ($parts.Count -ge 2) {
-        & kubectl --context $env:KCOMM_CTX get pod -n $parts[0] $parts[1] -o wide 2>$null
+} elseif ($Mode -eq 'pod-single-ns' -or $Mode -eq 'pod-all-ns') {
+    $parts = $Line -split "`t", 5
+    if ($parts.Count -ge 5) {
+        if ($Mode -eq 'pod-all-ns') {
+            Write-Host "命名空间: $($parts[0])"
+        }
+        Write-Host "Pod: $($parts[1])"
+        Write-Host "状态: $(if ($parts[2]) { $parts[2] } else { '-' })"
+        Write-Host "启动时间: $(if ($parts[3]) { $parts[3] } else { '-' })"
+        Write-Host "Pod IP: $(if ($parts[4]) { $parts[4] } else { '-' })"
     }
 }
 '@ | Set-Content -LiteralPath $script:PreviewHelper -Encoding UTF8
@@ -130,58 +136,102 @@ function Select-Context([string]$Kubeconfig) {
     return $chosen
 }
 
-# 获取 Pod 列表：仅 Running，使用 custom-columns 避免大 JSON 解析问题
-function Get-PodList([string]$Kubeconfig, [string]$Context) {
+# 获取命名空间列表（使用指定 context）
+function Get-NamespaceList([string]$Kubeconfig, [string]$Context) {
     $env:KUBECONFIG = $Kubeconfig
-    $raw = kubectl --context=$Context get pods -A `
+    $raw = kubectl --context=$Context get namespaces -o jsonpath='{.items[*].metadata.name}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    @($raw -split '\s+' | Where-Object { $_ })
+}
+
+# 选择命名空间：此阶段仅选择 namespace，不查询 Pod；确定后再拉取 Pod 列表
+function Select-Namespace([string]$Kubeconfig, [string]$Context) {
+    $env:KUBECONFIG = $Kubeconfig
+    $list = @(Get-NamespaceList $Kubeconfig $Context)
+    if ($list.Count -eq 0) {
+        $err = kubectl --context=$Context get namespaces --request-timeout=10s 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $errTrim = if ($err.Length -gt 350) { $err.Substring(0, 350) + '...' } else { $err }
+            Exit-WithError "无法获取命名空间列表（权限或网络）。kubectl 输出: $errTrim"
+        }
+        Exit-WithError '未找到任何命名空间。'
+    }
+    $fullList = @('<全部命名空间>') + @($list)
+    $preview = 'echo 仅选择命名空间，确认后再查询 Pod 列表'
+    $chosen = $fullList | fzf @script:FzfOpts --prompt='Namespace (命名空间)> ' --preview $preview --preview-window=right:50%
+    if (-not $chosen) { Exit-WithError '未选择命名空间，已退出' }
+    if ($chosen -eq '<全部命名空间>') { return '' }
+    return $chosen
+}
+
+# 获取 Pod 列表：仅 Running；返回 namespace、pod、status、startTime、podIP
+function Get-PodList([string]$Kubeconfig, [string]$Context, [string]$Namespace) {
+    $env:KUBECONFIG = $Kubeconfig
+    $nsArg = if ($Namespace) { @('-n', $Namespace) } else { @('-A') }
+    $raw = kubectl --context=$Context get pods @nsArg `
         --field-selector="status.phase=$script:PodPhase" `
-        -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name' `
+        -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,STATUS:.status.phase,START_TIME:.status.startTime,POD_IP:.status.podIP' `
         --no-headers 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
     @($raw | Where-Object { $_ -match '\S' } | ForEach-Object {
-        $parts = $_ -split '\s+', 2
-        "$($parts[0])`t$($parts[1])"
+        $parts = $_ -split '\s+', 5
+        $namespace = if ($parts.Count -ge 1) { $parts[0] } else { '' }
+        $pod = if ($parts.Count -ge 2) { $parts[1] } else { '' }
+        $status = if ($parts.Count -ge 3) { $parts[2] } else { '' }
+        $startTime = if ($parts.Count -ge 4) { $parts[3] } else { '' }
+        $podIp = if ($parts.Count -ge 5) { $parts[4] } else { '' }
+        "$namespace`t$pod`t$status`t$startTime`t$podIp"
     })
 }
 
-# 选择 Pod：fzf 模糊匹配
-function Select-Pod([string]$Kubeconfig, [string]$Context) {
-    $list = @(Get-PodList $Kubeconfig $Context)
+# 选择 Pod：全部命名空间时 preview 展示 namespace；指定命名空间时不展示
+function Select-Pod([string]$Kubeconfig, [string]$Context, [string]$Namespace) {
+    $list = @(Get-PodList $Kubeconfig $Context $Namespace)
     if ($list.Count -eq 0) {
         # 区分「无 Pod」与「集群不可达/无权限」：重新执行并捕获 stderr 与退出码
         $env:KUBECONFIG = $Kubeconfig
-        $err = kubectl --context=$Context get pods -A `
+        $nsArgs = if ($Namespace) { @('-n', $Namespace) } else { @('-A') }
+        $err = kubectl --context=$Context get pods @nsArgs `
             --field-selector="status.phase=$script:PodPhase" `
             --request-timeout=10s `
-            -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name' `
+            -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,STATUS:.status.phase,START_TIME:.status.startTime,POD_IP:.status.podIP' `
             --no-headers 2>&1
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) {
             $errTrim = if ($err.Length -gt 450) { $err.Substring(0, 450) + '...' } else { $err }
             Exit-WithError "无法访问集群或没有权限（kubectl 退出码 $exitCode）。请检查 KUBECONFIG、context、网络与 RBAC。kubectl 输出: $errTrim"
         }
-        Exit-WithError "当前集群没有 $script:PodPhase 状态的 Pod。"
+        if ($Namespace) {
+            Exit-WithError "命名空间 `"$Namespace`" 下没有 $script:PodPhase 状态的 Pod。"
+        }
+        else {
+            Exit-WithError "当前集群没有 $script:PodPhase 状态的 Pod。"
+        }
     }
 
-    $formatted = $list | ForEach-Object {
-        $parts = $_ -split "`t", 2
-        '{0,-32} {1}' -f $parts[0], $parts[1]
-    }
-
-    $env:KCOMM_CTX = $Context
-    if ($IsWindows) {
-        Initialize-PreviewHelper
-        $preview = "pwsh -NoProfile -File `"$script:PreviewHelper`" -Mode pod -Line {q}"
+    if ($Namespace) {
+        $preview = if ($IsWindows) {
+            Initialize-PreviewHelper
+            "pwsh -NoProfile -File `"$script:PreviewHelper`" -Mode pod-single-ns -Line ""{}"""
+        }
+        else {
+            'printf "%s\n" {} | awk -F "\t" "{printf \"Pod: %s\n状态: %s\n启动时间: %s\nPod IP: %s\n\", \$2, (\$3 != \"\" ? \$3 : \"-\"), (\$4 != \"\" ? \$4 : \"-\"), (\$5 != \"\" ? \$5 : \"-\")}"'
+        }
     }
     else {
-        # 使用 {q} 将当前行以 shell 转义形式传入，在 preview 内解析为 ns/pod 再调用 kubectl，避免命令注入
-        $preview = 'set -- {q}; ns="${1%% *}"; pod="${1#* }"; pod="${pod# }"; kubectl --context="$KCOMM_CTX" get pod -n "$ns" "$pod" -o wide 2>/dev/null || true'
+        $preview = if ($IsWindows) {
+            Initialize-PreviewHelper
+            "pwsh -NoProfile -File `"$script:PreviewHelper`" -Mode pod-all-ns -Line ""{}"""
+        }
+        else {
+            'printf "%s\n" {} | awk -F "\t" "{printf \"命名空间: %s\nPod: %s\n状态: %s\n启动时间: %s\nPod IP: %s\n\", \$1, \$2, (\$3 != \"\" ? \$3 : \"-\"), (\$4 != \"\" ? \$4 : \"-\"), (\$5 != \"\" ? \$5 : \"-\")}"'
+        }
     }
 
-    $chosen = $formatted | fzf @script:FzfOpts --prompt='Pod (输入关键字模糊匹配)> ' --preview $preview --preview-window='right:60%'
+    $chosen = $list | fzf @script:FzfOpts --prompt='Pod (输入关键字模糊匹配)> ' --delimiter="`t" --with-nth='2,3,4,5' --preview $preview --preview-window='right:60%'
     if (-not $chosen) { Exit-WithError '未选择 Pod，已退出' }
 
-    $parts = $chosen.Trim() -split '\s+', 2
+    $parts = $chosen -split "`t", 5
     @{ Namespace = $parts[0]; Pod = $parts[1] }
 }
 
@@ -200,13 +250,16 @@ function Select-Container([string]$Kubeconfig, [string]$Context, [string]$Namesp
     return $chosen
 }
 
-# 进入容器：优先 bash，失败则 sh
+# 进入容器：仅在确认没有 /bin/bash 时才回退到 sh
 function Enter-Pod([string]$Kubeconfig, [string]$Context, [string]$Namespace, [string]$Pod, [string]$Container) {
     $env:KUBECONFIG = $Kubeconfig
     $extraArgs = if ($Container) { @('-c', $Container) } else { @() }
 
-    kubectl --context=$Context exec -it -n $Namespace $Pod @extraArgs -- /bin/bash 2>$null
-    if ($LASTEXITCODE -eq 126 -or $LASTEXITCODE -eq 127) {
+    kubectl --context=$Context exec -n $Namespace $Pod @extraArgs -- test -x /bin/bash *> $null
+    if ($LASTEXITCODE -eq 0) {
+        kubectl --context=$Context exec -it -n $Namespace $Pod @extraArgs -- /bin/bash
+    }
+    else {
         kubectl --context=$Context exec -it -n $Namespace $Pod @extraArgs -- /bin/sh
     }
 }
@@ -220,7 +273,10 @@ $env:KUBECONFIG = $kconfig
 
 $ctx = Select-Context $kconfig
 
-$podInfo = Select-Pod $kconfig $ctx
+# 先选命名空间，大集群下避免一次性拉全量 Pod
+$selectedNs = Select-Namespace $kconfig $ctx
+
+$podInfo = Select-Pod $kconfig $ctx $selectedNs
 
 $container = Select-Container $kconfig $ctx $podInfo.Namespace $podInfo.Pod
 
