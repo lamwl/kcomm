@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 #
 # kcomm.ps1 - 通过 fzf 选择 kubeconfig 和 Pod，快速进入容器 bash
-# PowerShell 7 版本
+# PowerShell 7 备份版，保留用于兼容场景
 #
 
 #Requires -Version 7.0

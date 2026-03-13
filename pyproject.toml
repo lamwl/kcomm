@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kcomm"
+version = "0.2.0"
+description = "Python-first kcomm CLI for Kubernetes pod shell access"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "InquirerPy",
+]
+
+[project.scripts]
+kcomm = "kcomm.cli:main"
+kcomm-py = "kcomm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
